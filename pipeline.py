@@ -1,17 +1,3 @@
-
-# requirements.txt:
-# fastapi
-# uvicorn
-# pdfplumber
-# sentence-transformers
-# faiss-cpu
-# pymupdf
-# opencv-python
-# pillow
-# openai
-# numpy
-# matplotlib
-
 from fastapi import FastAPI, UploadFile, File
 import os, shutil, io, base64, re
 
@@ -19,7 +5,6 @@ import pdfplumber
 import fitz
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 from PIL import Image
 
 from sentence_transformers import SentenceTransformer
@@ -27,6 +12,7 @@ import faiss
 from openai import OpenAI
 
 
+# ===================== APP =====================
 app = FastAPI()
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -35,10 +21,13 @@ CURRENT_PDF = None
 all_docs = []
 index = None
 
+client = OpenAI()  # API KEY من ENV
 
-client = OpenAI()  # المفتاح من ENV فقط
+# ===================== MODELS (load once) =====================
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
+# ===================== TEXT =====================
 def extract_text_clean(pdf_path):
     full_text = ""
     with pdfplumber.open(pdf_path) as pdf:
@@ -50,8 +39,7 @@ def extract_text_clean(pdf_path):
                 y_tolerance=2
             )
             if words:
-                page_text = " ".join(w["text"] for w in words)
-                full_text += page_text + "\n"
+                full_text += " ".join(w["text"] for w in words) + "\n"
 
     full_text = re.sub(r"-\s*\n\s*", "", full_text)
     full_text = re.sub(r"\s+", " ", full_text).strip()
@@ -62,24 +50,21 @@ def extract_text_clean(pdf_path):
 def chunk_text(text, chunk_size=600, overlap=120):
     chunks, start = [], 0
     while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
+        chunks.append(text[start:start+chunk_size])
         start += chunk_size - overlap
     return chunks
 
 
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-
-def render_pages(pdf_path, dpi=300):
+# ===================== VISION =====================
+def render_pages(pdf_path, dpi=200):  # ↓ خفّضنا dpi
     doc = fitz.open(pdf_path)
-    pages = []
     zoom = dpi / 72
     mat = fitz.Matrix(zoom, zoom)
+    pages = []
 
     for i, page in enumerate(doc):
         pix = page.get_pixmap(matrix=mat, alpha=False)
-        pages.append({"page": i + 1, "image": pix.tobytes("png")})
+        pages.append({"page": i+1, "image": pix.tobytes("png")})
     return pages
 
 
@@ -93,128 +78,86 @@ def detect_visual_blocks(page_img):
     boxes = []
     for c in contours:
         x, y, bw, bh = cv2.boundingRect(c)
-        if bw * bh > 0.02 * w * h:
+        if bw * bh > 0.03 * w * h:
             boxes.append((x, y, bw, bh))
     return boxes, img
 
 
-def extract_text_blocks(pdf_path, dpi=300):
-    doc = fitz.open(pdf_path)
-    scale = dpi / 72
-    pages_text = []
-
-    for page in doc:
-        blocks = page.get_text("blocks")
-        page_blocks = []
-        for b in blocks:
-            x0, y0, x1, y1, text, _, _ = b
-            text = text.strip()
-            if text:
-                page_blocks.append({
-                    "bbox": (x0*scale, y0*scale, x1*scale, y1*scale),
-                    "text": text
-                })
-        pages_text.append(page_blocks)
-    return pages_text
-
-
-def visual_bbox(x, y, w, h):
-    return (x, y, x+w, y+h)
-
-
-def find_caption(vb, text_blocks, max_distance=150):
-    vx0, vy0, vx1, vy1 = vb
-    candidates = []
-
-    for block in text_blocks:
-        tx0, ty0, tx1, ty1 = block["bbox"]
-        if ty0 > vy1:
-            d = ty0 - vy1
-            if d < max_distance:
-                candidates.append((d, block["text"]))
-
-    if not candidates:
-        return None
-    return sorted(candidates)[0][1]
-
-
-
+# ===================== IMAGE DESCRIPTION =====================
 def describe_image(image_bytes):
     image_b64 = base64.b64encode(image_bytes).decode()
-    prompt = """Describe this scientific figure or table in precise academic language."""
+    prompt = "Describe this scientific figure or table in precise academic language."
+
     res = client.chat.completions.create(
         model="gpt-5-mini",
         messages=[{
-  "role": "user",
+            "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}}
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/png;base64,{image_b64}"}}
             ]
         }],
-        max_completion_tokens=300
+        max_completion_tokens=200
     )
     return res.choices[0].message.content
 
 
-
+# ===================== API =====================
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
-    global CURRENT_PDF
+    global CURRENT_PDF, index, all_docs
     path = os.path.join(UPLOAD_DIR, file.filename)
     with open(path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    CURRENT_PDF = path
-    return {"status": "uploaded", "file": file.filename}
 
+    CURRENT_PDF = path
+    index = None
+    all_docs = []
+    return {"status": "uploaded"}
 
 
 @app.post("/process")
 def process_pdf():
     global all_docs, index
 
+    if not CURRENT_PDF:
+        return {"error": "No PDF uploaded"}
+
+    # TEXT ONLY (خفيف)
     text = extract_text_clean(CURRENT_PDF)
-    text_chunks = chunk_text(text)
+    chunks = chunk_text(text)
 
-    pages = render_pages(CURRENT_PDF)
-    text_pages = extract_text_blocks(CURRENT_PDF)
+    all_docs = [{"type": "text", "content": c} for c in chunks]
 
-    image_docs = []
-    for i, page in enumerate(pages):
-        boxes, img = detect_visual_blocks(page["image"])
-        for (x, y, w, h) in boxes:
-            crop = img[y:y+h, x:x+w]
-            pil = Image.fromarray(crop)
-            buf = io.BytesIO()
-            pil.save(buf, format="PNG")
-            desc = describe_image(buf.getvalue())
-            image_docs.append(f"Figure (page {i+1}): {desc}")
+    embeddings = embed_model.encode(
+        [c["content"] for c in all_docs],
+        convert_to_numpy=True
+    )
 
-    all_docs = [{"type": "text", "content": c} for c in text_chunks]
-    all_docs += [{"type": "figure", "content": f} for f in image_docs]
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(embeddings)
 
-    texts = [d["content"] for d in all_docs]
-    emb = embed_model.encode(texts, convert_to_numpy=True)
-
-    index = faiss.IndexFlatL2(emb.shape[1])
-    index.add(emb)
-
-    return {"status": "processed", "elements": len(all_docs)}
+    return {"status": "processed", "chunks": len(all_docs)}
 
 
-
-def get_context(q, k=5):
-    q_emb = embed_model.encode([q])
+def get_context(question, k=5):
+    q_emb = embed_model.encode([question])
     _, ids = index.search(q_emb, k)
     return "\n\n".join(all_docs[i]["content"] for i in ids[0])
 
 
 @app.post("/chat")
 def chat(question: str):
+    if index is None:
+        return {"error": "PDF not processed yet"}
+
     context = get_context(question)
     prompt = f"{context}\n\nQuestion: {question}"
+
     res = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=500
+        max_tokens=400
     )
     return {"answer": res.choices[0].message.content}
