@@ -80,23 +80,36 @@ def detect_visual_blocks(page_img):
     return boxes, img
 
 
-def describe_image(image_bytes):
+def describe_image(image_bytes, context: str | None = None):
     image_b64 = base64.b64encode(image_bytes).decode()
-    prompt = "Describe this scientific figure or table in precise academic language."
+
+    user_content = [
+        {
+            "type": "text",
+            "text": (
+                "You are analyzing a figure from a scientific paper.\n"
+                f"Context from the paper:\n{context or '(no extra context)'}\n\n"
+                "Describe ONLY the scientific content of this figure or table "
+                "(axes, labels, regions, distributions, trends, etc.).\n"
+                "If the image looks like a photo of a person, a face, or anything "
+                "that is not a scientific figure/table/diagram from the paper, "
+                "reply exactly with:\n"
+                "\"This image does not appear to be a scientific figure from the paper.\""
+            ),
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+        },
+    ]
 
     res = client.chat.completions.create(
-        model="gpt-5-mini",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{image_b64}"}
-                }
-            ]
-        }],
-        max_completion_tokens=200
+        model="gpt-4o-mini",   # أو المودل اللي تفضلينه
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        max_completion_tokens=400,
     )
     return res.choices[0].message.content
 
