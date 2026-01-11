@@ -3,15 +3,8 @@ import shutil
 import os
 
 from pipeline import (
-    extract_text_clean,
-    chunk_text,
-    render_pages,
-    detect_visual_blocks,
-    extract_text_blocks,
-    find_caption,
-    visual_bbox,
-    describe_image,
-    ask_llm
+    build_index,
+    ask_llm,
 )
 
 app = FastAPI(title="Research Paper Chatbot Backend")
@@ -19,33 +12,38 @@ app = FastAPI(title="Research Paper Chatbot Backend")
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     file_path = os.path.join(UPLOAD_DIR, file.filename)
 
+    # نحفظ الملف
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
+    # نبني الإندكس مباشرة بعد الرفع
+    chunks = build_index(file_path)
+
     return {
-        "status": "uploaded",
-        "file_path": file_path
+        "status": "uploaded_and_indexed",
+        "file_path": file_path,
+        "chunks": chunks
     }
 
 
 @app.post("/ask")
-def ask_question(pdf_path: str, question: str):
+def ask_question(question: str):
     """
-    pdf_path: path of uploaded pdf
-    question: user question
+    question: user question about the uploaded PDF
     """
-
-  
     answer = ask_llm(question)
 
     return {
         "question": question,
         "answer": answer
     }
+
+
 @app.get("/")
 def root():
     return {"status": "ok"}
