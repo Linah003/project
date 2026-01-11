@@ -1,5 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
-import os, shutil, io, base64, re
+import os, io, base64, re
 
 import pdfplumber
 import fitz
@@ -11,9 +10,7 @@ from sentence_transformers import SentenceTransformer
 import faiss
 from openai import OpenAI
 
-
-# ===================== APP =====================
-app = FastAPI()
+# ===================== GLOBALS =====================
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -23,7 +20,7 @@ index = None
 
 client = OpenAI()  # API KEY من ENV
 
-# ===================== MODELS (load once) =====================
+# مودل الامبدنق
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
@@ -55,8 +52,8 @@ def chunk_text(text, chunk_size=600, overlap=120):
     return chunks
 
 
-# ===================== VISION =====================
-def render_pages(pdf_path, dpi=200):  # ↓ خفّضنا dpi
+# ===================== VISION (اختياري للصور) =====================
+def render_pages(pdf_path, dpi=200):
     doc = fitz.open(pdf_path)
     zoom = dpi / 72
     mat = fitz.Matrix(zoom, zoom)
@@ -64,7 +61,7 @@ def render_pages(pdf_path, dpi=200):  # ↓ خفّضنا dpi
 
     for i, page in enumerate(doc):
         pix = page.get_pixmap(matrix=mat, alpha=False)
-        pages.append({"page": i+1, "image": pix.tobytes("png")})
+        pages.append({"page": i + 1, "image": pix.tobytes("png")})
     return pages
 
 
@@ -83,7 +80,6 @@ def detect_visual_blocks(page_img):
     return boxes, img
 
 
-# ===================== IMAGE DESCRIPTION =====================
 def describe_image(image_bytes):
     image_b64 = base64.b64encode(image_bytes).decode()
     prompt = "Describe this scientific figure or table in precise academic language."
@@ -94,8 +90,10 @@ def describe_image(image_bytes):
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                {"type": "image_url",
-                 "image_url": {"url": f"data:image/png;base64,{image_b64}"}}
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{image_b64}"}
+                }
             ]
         }],
         max_completion_tokens=200
@@ -103,29 +101,14 @@ def describe_image(image_bytes):
     return res.choices[0].message.content
 
 
-# ===================== API =====================
-@app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
-    global CURRENT_PDF, index, all_docs
-    path = os.path.join(UPLOAD_DIR, file.filename)
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+# ===================== RAG: INDEX BUILDING =====================
+def build_index(pdf_path):
+    """يبني الإندكس للـ PDF ويخزّنه في globals."""
+    global CURRENT_PDF, all_docs, index
 
-    CURRENT_PDF = path
-    index = None
-    all_docs = []
-    return {"status": "uploaded"}
+    CURRENT_PDF = pdf_path
 
-
-@app.post("/process")
-def process_pdf():
-    global all_docs, index
-
-    if not CURRENT_PDF:
-        return {"error": "No PDF uploaded"}
-
-    # TEXT ONLY (خفيف)
-    text = extract_text_clean(CURRENT_PDF)
+    text = extract_text_clean(pdf_path)
     chunks = chunk_text(text)
 
     all_docs = [{"type": "text", "content": c} for c in chunks]
@@ -138,24 +121,27 @@ def process_pdf():
     index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(embeddings)
 
-    return {"status": "processed", "chunks": len(all_docs)}
+    return len(all_docs)
+
+
 def get_context(question, k=5):
+    """يرجع أقرب مقاطع للسؤال من الإندكس."""
+    if index is None:
+        raise ValueError("PDF not processed yet")
+
     q_emb = embed_model.encode([question])
     _, ids = index.search(q_emb, k)
     return "\n\n".join(all_docs[i]["content"] for i in ids[0])
 
 
-@app.post("/chat")
-def chat(question: str):
-    if index is None:
-        return {"error": "PDF not processed yet"}
-
+def ask_llm(question: str) -> str:
+    """ياخذ سؤال، يرجع إجابة مبنية على الـ PDF المخزّن."""
     context = get_context(question)
     prompt = f"{context}\n\nQuestion: {question}"
 
     res = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=400
+        max_completion_tokens=400,
     )
-    return {"answer": res.choices[0].message.content}
+    return res.choices[0].message.content
