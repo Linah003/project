@@ -7,7 +7,7 @@ pymupdf
 sentence-transformers
 faiss-cpu
 
-opencv-python
+opencv-python-headless
 pillow
 numpy
 
