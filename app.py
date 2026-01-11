@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File
 import shutil
 import os
+from fastapi.middleware.cors import CORSMiddleware
 
 from pipeline import (
     build_index,
@@ -8,6 +9,13 @@ from pipeline import (
 )
 
 app = FastAPI(title="Research Paper Chatbot Backend")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -42,8 +50,3 @@ def ask_question(question: str):
         "question": question,
         "answer": answer
     }
-
-
-@app.get("/")
-def root():
-    return {"status": "ok"}
