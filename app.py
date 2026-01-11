@@ -46,3 +46,6 @@ def ask_question(pdf_path: str, question: str):
         "question": question,
         "answer": answer
     }
+@app.get("/")
+def root():
+    return {"status": "ok"}
